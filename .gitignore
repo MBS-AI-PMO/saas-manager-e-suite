@@ -1,0 +1,21 @@
+# Dependencies and builds
+node_modules/
+dist/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+backend/keys/
+
+# Local-only data (embedded dev database, its keys and backups)
+backend/.dev-db/
+backend/.dev-db.backup/
+backend/.dev-keys/
+
+# Logs / OS / editor
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

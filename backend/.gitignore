@@ -1,0 +1,6 @@
+node_modules/
+.env
+keys/
+*.log
+.dev-db/
+.dev-keys/

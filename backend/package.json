@@ -1,0 +1,37 @@
+{
+  "name": "saas-manager-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central SaaS Identity & Access Management API (Express + PostgreSQL)",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "dev:memory": "node scripts/dev-memory.js",
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/migrate.js --seed",
+    "keys:generate": "node scripts/generate-keys.js",
+    "admin:create": "node scripts/create-admin.js",
+    "test": "node --test test/*.test.js",
+    "import:dev-memory": "node scripts/import-dev-memory.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11"
+  }
+}
