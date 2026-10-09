@@ -135,12 +135,28 @@ export function Modal({ open, onClose, title, subtitle, children, footer, varian
   );
 }
 
+function legacyCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  // inside an open modal <dialog> everything outside it is inert, so add the textarea there
+  (document.querySelector('dialog[open]') ?? document.body).appendChild(ta);
+  ta.select();
+  const ok = document.execCommand('copy');
+  ta.remove();
+  if (!ok) throw new Error('copy failed');
+}
+
 export function CopyField({ value, secret = false }) {
   const [copied, setCopied] = useState(false);
   const [shown, setShown] = useState(!secret);
   async function copy() {
     try {
-      await navigator.clipboard.writeText(value);
+      // navigator.clipboard exists on HTTPS/localhost only; plain-HTTP deployments use the old way
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
+      else legacyCopy(value);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {

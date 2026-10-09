@@ -9,7 +9,10 @@ import { toCode } from '../lib/format.js';
 import { Icon } from './ui/Icon.jsx';
 import { CopyField, Field, Modal } from './ui/ui.jsx';
 
-const newRole = (name = '') => ({ key: crypto.randomUUID(), role_name: name, role_code: toCode(name), codeEdited: false, permissions: '' });
+// List keys only. Not crypto.randomUUID(): browsers expose it on HTTPS/localhost only,
+// so it crashed the dialog on a plain-HTTP deployment.
+let roleKeySeq = 0;
+const newRole = (name = '') => ({ key: `role-${++roleKeySeq}`, role_name: name, role_code: toCode(name), codeEdited: false, permissions: '' });
 
 export function CreatePortalDialog({ open, onClose, onCreated }) {
   return (
