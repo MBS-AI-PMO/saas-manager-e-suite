@@ -5,6 +5,7 @@
  * deploy fails loudly at boot instead of at the first webhook.
  */
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -59,10 +60,37 @@ if (!parsed.success) {
 
 const raw = parsed.data;
 
-/** PEM pasted into an env var (single line with \n escapes, or real newlines). */
+/**
+ * PEM pasted into an env var. Hosting panels mangle it in different ways (real
+ * newlines, "\n" or "\\n" escapes, surrounding quotes, newlines turned into
+ * spaces), so rebuild a clean PEM from the BEGIN/END labels and the base64 body.
+ */
 function pemFromEnv(value) {
   if (!value?.trim()) return undefined;
-  return `${value.replace(/\\n/g, '\n').trim()}\n`;
+  const text = value
+    .trim()
+    .replace(/^(['"])([\s\S]*)\1$/, '$2') // surrounding quotes
+    .replace(/\\+r/g, '')
+    .replace(/\\+n/g, '\n');
+  const m = text.match(/-----BEGIN ([A-Z ]+)-----([\s\S]*?)-----END \1-----/);
+  if (!m) return text.endsWith('\n') ? text : `${text}\n`; // let the key check below report it
+  const body = m[2].replace(/[^A-Za-z0-9+/=]/g, '');
+  return `-----BEGIN ${m[1]}-----\n${body.match(/.{1,64}/g).join('\n')}\n-----END ${m[1]}-----\n`;
+}
+
+/** Fail at boot with the variable name instead of a crypto stack trace later. */
+function checkKey(pem, kind, source) {
+  try {
+    (kind === 'private' ? crypto.createPrivateKey : crypto.createPublicKey)(pem);
+    return pem;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `${source} is not a valid PEM ${kind} key (${e.code || e.message}). ` +
+        'Paste the whole key including the -----BEGIN/END----- lines, as one line with \\n or with real newlines.',
+    );
+    process.exit(1);
+  }
 }
 
 /** Read a PEM file relative to the project root, with a clear error. */
@@ -81,6 +109,10 @@ export const env = Object.freeze({
   ...raw,
   isProduction: raw.NODE_ENV === 'production',
   corsOrigins: raw.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean),
-  jwtPrivateKey: pemFromEnv(raw.JWT_PRIVATE_KEY) ?? readKey(raw.JWT_PRIVATE_KEY_PATH, 'JWT private key'),
-  jwtPublicKey: pemFromEnv(raw.JWT_PUBLIC_KEY) ?? readKey(raw.JWT_PUBLIC_KEY_PATH, 'JWT public key'),
+  jwtPrivateKey: raw.JWT_PRIVATE_KEY?.trim()
+    ? checkKey(pemFromEnv(raw.JWT_PRIVATE_KEY), 'private', 'JWT_PRIVATE_KEY')
+    : checkKey(readKey(raw.JWT_PRIVATE_KEY_PATH, 'JWT private key'), 'private', raw.JWT_PRIVATE_KEY_PATH),
+  jwtPublicKey: raw.JWT_PUBLIC_KEY?.trim()
+    ? checkKey(pemFromEnv(raw.JWT_PUBLIC_KEY), 'public', 'JWT_PUBLIC_KEY')
+    : checkKey(readKey(raw.JWT_PUBLIC_KEY_PATH, 'JWT public key'), 'public', raw.JWT_PUBLIC_KEY_PATH),
 });
