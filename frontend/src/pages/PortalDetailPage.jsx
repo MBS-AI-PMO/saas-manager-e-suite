@@ -638,6 +638,21 @@ function SettingsTab({ portal, reloadPortals, notify }) {
     }
   }
 
+  async function setOrgEvents(on) {
+    try {
+      await api.updatePortal(portal.portal_code, { receive_org_events: on });
+      notify({
+        tone: 'success',
+        text: on
+          ? `${portal.portal_name} will receive EMS companies, clients and projects; the current list is being sent now.`
+          : `${portal.portal_name} no longer receives organisation events.`,
+      });
+      reloadPortals();
+    } catch (err) {
+      notify({ tone: 'error', text: err.message });
+    }
+  }
+
   async function setAutoGrant(roleCode) {
     try {
       const updated = await api.updatePortal(portal.portal_code, { auto_grant_role: roleCode || null });
@@ -766,6 +781,18 @@ function SettingsTab({ portal, reloadPortals, notify }) {
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <strong>Send organisation</strong>
+            <p className="muted small">
+              Send this portal every EMS company, client and project (org.updated events) whenever they change, and right
+              away when switched on. Turn on for portals that mirror the organisation, such as Payroll. Every user event
+              already carries the user&apos;s own company, client and projects.
+            </p>
+          </div>
+          <Switch checked={Boolean(portal.receive_org_events)} onChange={setOrgEvents} label="Send organisation" />
         </div>
 
         <div className="setting-row">

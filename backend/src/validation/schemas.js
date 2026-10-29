@@ -18,6 +18,12 @@ const emsRef = z
 // EMS -> SaaS
 // ---------------------------------------------------------------------------
 
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD').nullable().optional();
+const emsOrgRef = z
+  .object({ ems_id: z.number().int().positive(), name: z.string().trim().min(1).max(200) })
+  .nullable()
+  .optional();
+
 /** One user record as produced by HRMS App\Services\Saas\EmsUserPayloadBuilder. */
 export const emsUserSchema = z.object({
   ems_user_id: z.number().int().positive(),
@@ -27,12 +33,27 @@ export const emsUserSchema = z.object({
   is_active: z.boolean(),
   department: emsRef,
   designation: emsRef,
+  // Every project the user is on: as a member, or as the project's HR / Manager.
+  // is_lead (= Manager) is kept for older receivers.
   deployed_projects: z
-    .array(z.object({ ems_id: z.number().int().positive(), title: z.string().trim().min(1).max(200), is_lead: z.boolean() }))
-    .max(100)
+    .array(
+      z.object({
+        ems_id: z.number().int().positive(),
+        title: z.string().trim().min(1).max(200),
+        is_lead: z.boolean(),
+        role: z.enum(['member', 'hr', 'manager']).optional(),
+      }),
+    )
+    .max(200)
     .default([]),
   deployed_location: emsRef,
   ems_role: emsRef,
+  // The company / client the employee is registered under, and employment dates.
+  company: emsOrgRef,
+  client: emsOrgRef,
+  joining_date: isoDate,
+  exit_date: isoDate,
+  phone: z.string().trim().max(50).nullable().optional(),
   // Laravel bcrypt hash ($2y$...). Optional: only sent when the HRMS opts in.
   password_hash: z
     .string()
@@ -63,6 +84,41 @@ export const emsWebhookSchema = z.discriminatedUnion('event', [
     occurred_at: z.string().datetime({ offset: true }),
     data: z.object({ ems_user_ids: z.array(z.number().int().positive()).min(1).max(500) }),
   }),
+  z.object({
+    event_id: z.string().uuid(),
+    event: z.literal('org.synced'),
+    occurred_at: z.string().datetime({ offset: true }),
+    // The complete EMS organisation: anything missing is marked inactive (never deleted).
+    data: z.object({
+      companies: z
+        .array(z.object({ ems_id: z.number().int().positive(), name: z.string().trim().min(1).max(200), is_active: z.boolean().default(true) }))
+        .max(5000),
+      clients: z
+        .array(
+          z.object({
+            ems_id: z.number().int().positive(),
+            name: z.string().trim().min(1).max(200),
+            company_ems_id: z.number().int().positive().nullable().optional(),
+            is_active: z.boolean().default(true),
+          }),
+        )
+        .max(10000),
+      projects: z
+        .array(
+          z.object({
+            ems_id: z.number().int().positive(),
+            title: z.string().trim().min(1).max(200),
+            company_ems_id: z.number().int().positive().nullable().optional(),
+            client_ems_id: z.number().int().positive().nullable().optional(),
+            status: z.string().trim().max(40).nullable().optional(),
+            start_date: isoDate,
+            end_date: isoDate,
+            is_active: z.boolean().default(true),
+          }),
+        )
+        .max(10000),
+    }),
+  }),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -82,8 +138,9 @@ export const createUserSchema = z.object({
   password: z.string().min(10, 'Password must be at least 10 characters').max(128).optional(),
   department_id: z.string().uuid().nullable().optional(),
   designation_id: z.string().uuid().nullable().optional(),
-  deployed_project: z.string().trim().max(500).nullable().optional(),
   deployed_location: z.string().trim().max(200).nullable().optional(),
+  // Project-based: every user is created on at least one (EMS) project.
+  project_ids: z.array(z.string().uuid()).min(1, 'Select at least one project').max(100),
   portal_access: z.array(initialAccess).max(50).default([]),
 });
 
@@ -106,6 +163,8 @@ export const listUsersQuerySchema = z.object({
   source: z.enum(['EMS', 'DIRECT_SAAS']).optional(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
   department_id: z.string().uuid().optional(),
+  project_id: z.string().uuid().optional(),
+  company_id: z.string().uuid().optional(),
   // Per-portal access view, e.g. ?portal_code=HR_PORTAL&access=active
   portal_code: code.optional(),
   access: z.enum(['any', 'granted', 'active', 'inactive', 'none']).optional(),
@@ -159,6 +218,8 @@ export const createPortalSchema = z
     auto_grant_role: code.nullable().optional(),
     // EMS-sourced portals: fallback role for auto-assign, by EMS role id.
     auto_grant_ems_role_id: z.number().int().positive().nullable().optional(),
+    // Send this portal the EMS organisation (companies, clients, projects) as org.updated events.
+    receive_org_events: z.boolean().default(false),
     roles: z.array(portalRoleSchema).max(50).default([]),
   })
   .refine((b) => b.role_source !== 'SAAS' || b.roles.length > 0, { message: 'Add at least one role', path: ['roles'] })
@@ -173,6 +234,7 @@ export const updatePortalSchema = z
     auto_grant_role: code.nullable().optional(),
     role_source: z.enum(['SAAS', 'EMS', 'PORTAL']).optional(),
     roles_url: url.nullable().optional(),
+    receive_org_events: z.boolean().optional(),
   })
   .refine((b) => Object.keys(b).length > 0, { message: 'Nothing to update' });
 

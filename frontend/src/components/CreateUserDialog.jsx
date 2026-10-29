@@ -3,7 +3,7 @@
  * auditor), optionally with initial portal access. EMS employees are never
  * created here; they arrive through EMS sync.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { api } from '../api/identityApi.js';
 import { Field, Modal } from './ui/ui.jsx';
 
@@ -15,18 +15,27 @@ export function CreateUserDialog({ open, onClose, ...rest }) {
   );
 }
 
-const EMPTY = { full_name: '', email: '', password: '', department_id: '', designation_id: '', deployed_project: '', deployed_location: '' };
+const EMPTY = { full_name: '', email: '', password: '', department_id: '', designation_id: '', deployed_location: '' };
 
-function validate(form) {
+function validate(form, projectIds) {
   const errors = {};
+  if (projectIds.length === 0) errors.project_ids = 'Select at least one project.';
   if (form.full_name.trim().length < 2) errors.full_name = 'Enter the full name.';
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) errors.email = 'Enter a valid email address.';
   if (form.password && form.password.length < 10) errors.password = 'Use at least 10 characters, or leave blank.';
   return errors;
 }
 
-function CreateUserForm({ onCancel, onCreated, portals, departments, designations }) {
+function CreateUserForm({ onCancel, onCreated, portals, departments, designations, projects = [] }) {
   const [form, setForm] = useState(EMPTY);
+  const [projectIds, setProjectIds] = useState([]);
+  const [projectSearch, setProjectSearch] = useState('');
+  const visibleProjects = useMemo(() => {
+    const q = projectSearch.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter((p) => [p.title, p.company_name, p.client_name].some((v) => (v ?? '').toLowerCase().includes(q)));
+  }, [projects, projectSearch]);
+  const toggleProject = (id) => setProjectIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   const [grants, setGrants] = useState({}); // { PORTAL_CODE: ROLE_CODE }
   const [errors, setErrors] = useState({});
   const [serverError, setServerError] = useState(null);
@@ -35,7 +44,7 @@ function CreateUserForm({ onCancel, onCreated, portals, departments, designation
 
   async function submit(e) {
     e.preventDefault();
-    const v = validate(form);
+    const v = validate(form, projectIds);
     // Every ticked portal needs a role.
     for (const [code, role] of Object.entries(grants)) {
       if (!role) v[`portal_${code}`] = 'Choose a role.';
@@ -52,7 +61,7 @@ function CreateUserForm({ onCancel, onCreated, portals, departments, designation
         ...(form.password ? { password: form.password } : {}),
         department_id: form.department_id || null,
         designation_id: form.designation_id || null,
-        deployed_project: form.deployed_project.trim() || null,
+        project_ids: projectIds,
         deployed_location: form.deployed_location.trim() || null,
         portal_access: Object.entries(grants).map(([portal_code, role_code]) => ({ portal_code, role_code, is_active: true })),
       });
@@ -97,11 +106,41 @@ function CreateUserForm({ onCancel, onCreated, portals, departments, designation
             ))}
           </select>
         </Field>
-        <Field label="Deployed project">
-          <input className="input" value={form.deployed_project} onChange={set('deployed_project')} />
-        </Field>
-        <Field label="Location" className="span-2">
+        <Field label="Location">
           <input className="input" value={form.deployed_location} onChange={set('deployed_location')} />
+        </Field>
+        <Field
+          label="Projects"
+          className="span-2"
+          hint={projects.length ? `Required. ${projectIds.length} selected — projects come from EMS (HRMS).` : undefined}
+          error={errors.project_ids}
+        >
+          {projects.length === 0 ? (
+            <p className="muted small">No EMS projects yet. Projects arrive automatically from the HRMS sync.</p>
+          ) : (
+            <div className="project-pick">
+              <input
+                className="input"
+                type="search"
+                placeholder="Search projects, companies or clients"
+                value={projectSearch}
+                onChange={(e) => setProjectSearch(e.target.value)}
+                aria-label="Search projects"
+              />
+              <div className="project-pick__list" role="group" aria-label="Projects">
+                {visibleProjects.map((p) => (
+                  <label key={p.id} className={`project-pick__item ${projectIds.includes(p.id) ? 'is-on' : ''}`}>
+                    <input type="checkbox" checked={projectIds.includes(p.id)} onChange={() => toggleProject(p.id)} />
+                    <span>
+                      <strong>{p.title}</strong>
+                      <span className="muted small">{[p.company_name, p.client_name].filter(Boolean).join(' · ') || '—'}</span>
+                    </span>
+                  </label>
+                ))}
+                {visibleProjects.length === 0 && <p className="muted small">No project matches “{projectSearch}”.</p>}
+              </div>
+            </div>
+          )}
         </Field>
       </div>
 

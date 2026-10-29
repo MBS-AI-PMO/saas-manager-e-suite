@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { query } from '../db/pool.js';
 import { validateBody } from '../middleware/validate.js';
 import { listDepartments, listDesignations } from '../services/lookupService.js';
+import { getOrgCatalog } from '../services/orgService.js';
 import { getOverview, getRecentActivity } from '../services/overviewService.js';
 import {
   addPortalRole,
@@ -70,6 +71,12 @@ catalogRouter.get('/departments', async (_req, res) => {
 
 catalogRouter.get('/designations', async (_req, res) => {
   res.json({ data: await listDesignations({ query }) });
+});
+
+// EMS organisation: companies, clients and projects (project filter, "add user" project picker).
+catalogRouter.get('/org', async (req, res) => {
+  const activeOnly = req.query.active === '1' || req.query.active === 'true';
+  res.json({ data: await getOrgCatalog({ query }, { activeOnly }) });
 });
 
 // EMS role catalogue with how many EMS users hold each role.

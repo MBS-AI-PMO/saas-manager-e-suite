@@ -71,6 +71,10 @@ authRouter.post('/token', credentialLimiter, validateBody(portalTokenSchema), as
   const { email, password, portal_code } = req.valid.body;
   const grant = await authenticateForPortal(email, password, portal_code);
   if (!grant) throw INVALID_CREDENTIALS();
+  // Only reached with the correct password, so this tells the real user why, not a guesser.
+  if (grant.disabled) {
+    throw new HttpError(403, 'ACCESS_DISABLED', 'Your access to this portal has been disabled. Please contact HR.');
+  }
 
   const { token, expiresIn, claims } = signPortalToken(grant);
   res.set('Cache-Control', 'no-store').json({

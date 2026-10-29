@@ -18,7 +18,11 @@ import { applyAutoGrants } from './accessService.js';
 import { alignEmsPortalRoles } from './emsRoleService.js';
 import { writeAudit } from './auditService.js';
 import { resolveEmsLookup } from './lookupService.js';
-import { EventType, enqueuePortalEvents } from './outboxService.js';
+import { EventType, USER_ORG_JOINS, USER_ORG_SQL, enqueuePortalEvents } from './outboxService.js';
+import { resolveOrgRef, resolveProjectRef, setUserProjects } from './orgService.js';
+
+/** When a user appears on a project more than once, the strongest role wins. */
+const PROJECT_ROLE_RANK = { member: 1, manager: 2, hr: 3 };
 
 const BCRYPT_ROUNDS = 12;
 
@@ -81,6 +85,15 @@ export async function upsertEmsUser(emsUser, occurredAt, eventId) {
 
       const departmentId = await resolveEmsLookup(client, 'department', emsUser.department);
       const designationId = await resolveEmsLookup(client, 'designation', emsUser.designation);
+      const companyId = await resolveOrgRef(client, 'company', emsUser.company);
+      const clientId = await resolveOrgRef(client, 'client', emsUser.client);
+      const projectLinks = new Map();
+      for (const p of emsUser.deployed_projects) {
+        const projectId = await resolveProjectRef(client, p);
+        const role = p.role ?? (p.is_lead ? 'manager' : 'member');
+        const current = projectLinks.get(projectId);
+        if (!current || PROJECT_ROLE_RANK[role] > PROJECT_ROLE_RANK[current]) projectLinks.set(projectId, role);
+      }
       const deployedProject =
         emsUser.deployed_projects.map((p) => p.title).join(', ').slice(0, 500) || null;
       const status = emsUser.is_active ? 'ACTIVE' : 'INACTIVE';
@@ -100,6 +113,11 @@ export async function upsertEmsUser(emsUser, occurredAt, eventId) {
         occurredAt,
         hash,
         emsUser.ems_role?.ems_id ?? null,
+        companyId,
+        clientId,
+        emsUser.joining_date ?? null,
+        emsUser.exit_date ?? null,
+        emsUser.phone ?? null,
       ];
 
       let row;
@@ -108,8 +126,9 @@ export async function upsertEmsUser(emsUser, occurredAt, eventId) {
           await client.query(
             `INSERT INTO saas_users
                (source, ems_user_id, full_name, email, password_hash, department_id, designation_id,
-                deployed_project, deployed_location, ems_role_name, staff_id, status, ems_source_ts, ems_payload_hash, ems_role_id)
-             VALUES ('EMS', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                deployed_project, deployed_location, ems_role_name, staff_id, status, ems_source_ts, ems_payload_hash, ems_role_id,
+                company_id, client_id, joining_date, exit_date, phone)
+             VALUES ('EMS', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
              RETURNING *`,
             values,
           )
@@ -123,8 +142,8 @@ export async function upsertEmsUser(emsUser, occurredAt, eventId) {
                  password_hash = COALESCE($4, password_hash),
                  department_id = $5, designation_id = $6, deployed_project = $7, deployed_location = $8,
                  ems_role_name = $9, staff_id = $10, status = $11, ems_source_ts = $12, ems_payload_hash = $13,
-                 ems_role_id = $14
-               WHERE id = $15
+                 ems_role_id = $14, company_id = $15, client_id = $16, joining_date = $17, exit_date = $18, phone = $19
+               WHERE id = $20
            RETURNING *`,
             [...values, existing.id],
           )
@@ -132,7 +151,14 @@ export async function upsertEmsUser(emsUser, occurredAt, eventId) {
       }
 
       const outcome = !existing ? 'created' : adopting ? 'adopted' : 'updated';
-      await afterAccountChange(client, existing, row, actor, status === 'ACTIVE' ? 'EMS_REACTIVATED' : 'EMS_DEACTIVATED');
+      const projectsChanged = await setUserProjects(
+        client,
+        row.id,
+        [...projectLinks].map(([project_id, role]) => ({ project_id, role })),
+      );
+      await afterAccountChange(client, existing, row, actor, status === 'ACTIVE' ? 'EMS_REACTIVATED' : 'EMS_DEACTIVATED', {
+        projectsChanged,
+      });
       // New EMS identities get the default role on auto-assign portals.
       if (outcome !== 'updated') await applyAutoGrants(client, { userId: row.id, actor });
       // EMS role changed: portals whose roles come from EMS follow it.
@@ -200,7 +226,7 @@ export async function deactivateEmsUsers(emsUserIds, occurredAt, eventId) {
  *     per-portal flag is on.
  *   - Profile change only: send user.updated so portals refresh display data.
  */
-async function afterAccountChange(client, before, after, actor, reason) {
+async function afterAccountChange(client, before, after, actor, reason, { projectsChanged = false } = {}) {
   if (!before) return; // brand-new user has no portal access yet
 
   if (before.status !== after.status) {
@@ -222,11 +248,20 @@ async function afterAccountChange(client, before, after, actor, reason) {
     return;
   }
 
-  const profileChanged = ['full_name', 'email', 'department_id', 'designation_id', 'deployed_project', 'deployed_location', 'staff_id']
-    .some((k) => before[k] !== after[k]);
+  const profileChanged =
+    projectsChanged ||
+    ['full_name', 'email', 'department_id', 'designation_id', 'deployed_project', 'deployed_location', 'staff_id',
+      'company_id', 'client_id', 'joining_date', 'exit_date', 'phone']
+      .some((k) => comparable(before[k]) !== comparable(after[k]));
   if (profileChanged) {
     await enqueuePortalEvents(client, { userId: after.id, type: EventType.USER_UPDATED, reason: 'PROFILE_CHANGED', actor });
   }
+}
+
+/** Dates come back from pg as Date objects; compare everything as text. */
+function comparable(v) {
+  if (v === null || v === undefined) return null;
+  return v instanceof Date ? v.toISOString() : String(v);
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +293,16 @@ export async function createDirectUser(input, admin) {
       grants.push({ ...rows[0], is_active: access.is_active });
     }
 
+    // Project-based: the user is created on the chosen (active) EMS projects.
+    const projects = (
+      await client.query('SELECT id, title FROM projects WHERE id = ANY($1::uuid[]) AND is_active ORDER BY lower(title)', [
+        input.project_ids,
+      ])
+    ).rows;
+    if (projects.length !== new Set(input.project_ids).size) {
+      throw unprocessable('One or more selected projects do not exist or are no longer active');
+    }
+
     const passwordHash = input.password ? await bcrypt.hash(input.password, BCRYPT_ROUNDS) : null;
 
     const user = (
@@ -272,11 +317,15 @@ export async function createDirectUser(input, admin) {
           passwordHash,
           input.department_id ?? null,
           input.designation_id ?? null,
-          input.deployed_project ?? null,
+          projects.map((p) => p.title).join(', ').slice(0, 500) || null,
           input.deployed_location ?? null,
         ],
       )
     ).rows[0];
+
+    for (const p of projects) {
+      await client.query('INSERT INTO user_projects (user_id, project_id, project_role) VALUES ($1, $2, $3)', [user.id, p.id, 'member']);
+    }
 
     for (const g of grants) {
       await client.query(
@@ -301,7 +350,7 @@ export async function createDirectUser(input, admin) {
       actorLabel: admin.email,
       action: 'DIRECT_USER_CREATED',
       targetUserId: user.id,
-      details: { email: input.email, portals: input.portal_access },
+      details: { email: input.email, portals: input.portal_access, projects: projects.map((p) => p.title) },
     });
 
     return getUserById(user.id, client);
@@ -319,6 +368,7 @@ const USER_SELECT = `
          u.deployed_project, u.deployed_location, u.ems_role_name,
          (u.password_hash IS NOT NULL) AS has_password,
          u.created_at, u.updated_at,
+         ${USER_ORG_SQL},
          COALESCE((
            SELECT json_agg(json_build_object(
                     'portal_id', p.id, 'portal_code', p.portal_code, 'portal_name', p.portal_name,
@@ -330,7 +380,8 @@ const USER_SELECT = `
          ), '[]'::json) AS portal_access
     FROM saas_users u
     LEFT JOIN departments  d ON d.id = u.department_id
-    LEFT JOIN designations g ON g.id = u.designation_id`;
+    LEFT JOIN designations g ON g.id = u.designation_id
+    ${USER_ORG_JOINS}`;
 
 export async function getUserById(id, client = { query }) {
   const { rows } = await client.query(`${USER_SELECT} WHERE u.id = $1`, [id]);
@@ -338,7 +389,7 @@ export async function getUserById(id, client = { query }) {
   return rows[0];
 }
 
-export async function listUsers({ search, source, status, department_id, portal_code, access, page, page_size }) {
+export async function listUsers({ search, source, status, department_id, project_id, company_id, portal_code, access, page, page_size }) {
   // Dashboard-only admin accounts are not managed identities: hide them.
   // (An EMS employee who is also an admin still appears.)
   const where = [`NOT (u.saas_admin_role IS NOT NULL AND u.source = 'DIRECT_SAAS')`];
@@ -358,6 +409,8 @@ export async function listUsers({ search, source, status, department_id, portal_
   if (source) add('u.source = ?', source);
   if (status) add('u.status = ?', status);
   if (department_id) add('u.department_id = ?', department_id);
+  if (company_id) add('u.company_id = ?', company_id);
+  if (project_id) add('EXISTS (SELECT 1 FROM user_projects up WHERE up.user_id = u.id AND up.project_id = ?)', project_id);
 
   // Per-portal view: filter on this user's access row for one portal.
   if (portal_code && access && access !== 'any') {

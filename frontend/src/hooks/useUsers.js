@@ -32,6 +32,7 @@ export function useUsers(filters, { notify }) {
     source: filters.source || undefined,
     status: filters.status || undefined,
     department_id: filters.departmentId || undefined,
+    project_id: filters.projectId || undefined,
     portal_code: filters.portalCode || undefined,
     access: filters.portalCode && filters.access ? filters.access : undefined,
     page: filters.page,

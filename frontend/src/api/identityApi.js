@@ -59,6 +59,10 @@ export const api = {
   async emsRoles() {
     return (await request('/ems-roles')).data;
   },
+  /** EMS organisation: { companies, clients, projects }. activeOnly hides what EMS removed. */
+  async org({ activeOnly = false } = {}) {
+    return (await request('/org', { query: activeOnly ? { active: 1 } : {} })).data;
+  },
 
   // --- portals -------------------------------------------------------------------
   async listPortals() {

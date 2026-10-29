@@ -26,7 +26,39 @@ export const EventType = Object.freeze({
   ACCESS_REVOKED: 'access.revoked',
   ACCESS_ROLE_CHANGED: 'access.role_changed',
   USER_UPDATED: 'user.updated',
+  // Organisation catalogue (companies, clients, projects); only to portals with receive_org_events.
+  ORG_UPDATED: 'org.updated',
 });
+
+/**
+ * A user's organisation, as sent to portals in events and in /portal-sync/access.
+ * Expects saas_users aliased as `u`.
+ */
+export const USER_ORG_SQL = `
+            to_char(u.joining_date, 'YYYY-MM-DD') AS joining_date,
+            to_char(u.exit_date, 'YYYY-MM-DD') AS exit_date,
+            u.phone,
+            CASE WHEN co.id IS NULL THEN NULL
+                 ELSE json_build_object('id', co.id, 'ems_id', co.ems_ref_id, 'name', co.name) END AS company,
+            CASE WHEN cl.id IS NULL THEN NULL
+                 ELSE json_build_object('id', cl.id, 'ems_id', cl.ems_ref_id, 'name', cl.name) END AS client,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                       'id', pr.id, 'ems_id', pr.ems_ref_id, 'title', pr.title, 'role', up.project_role,
+                       'is_active', pr.is_active,
+                       'company_ems_id', pc.ems_ref_id, 'client_ems_id', pk.ems_ref_id)
+                     ORDER BY lower(pr.title))
+                FROM user_projects up
+                JOIN projects pr ON pr.id = up.project_id
+                LEFT JOIN companies pc ON pc.id = pr.company_id
+                LEFT JOIN clients   pk ON pk.id = pr.client_id
+               WHERE up.user_id = u.id
+            ), '[]'::json) AS projects`;
+
+/** Joins USER_ORG_SQL needs. */
+export const USER_ORG_JOINS = `
+       LEFT JOIN companies co ON co.id = u.company_id
+       LEFT JOIN clients   cl ON cl.id = u.client_id`;
 
 /**
  * Snapshot the current state of a user's access on the given portals and
@@ -49,13 +81,15 @@ export async function enqueuePortalEvents(client, { userId, portalIds, type, rea
             u.staff_id, d.dept_name, g.designation_name, u.deployed_project, u.deployed_location,
             p.id AS portal_id, p.portal_code,
             a.assigned_portal_role AS role_code, a.is_active, a.access_version,
-            r.role_name, r.permissions, r.ems_role_id, r.external_role_id, p.role_source
+            r.role_name, r.permissions, r.ems_role_id, r.external_role_id, p.role_source,
+            ${USER_ORG_SQL}
        FROM user_portal_access a
        JOIN saas_users   u ON u.id = a.user_id
        JOIN portals      p ON p.id = a.portal_id
        JOIN portal_roles r ON r.portal_id = a.portal_id AND r.role_code = a.assigned_portal_role
        LEFT JOIN departments  d ON d.id = u.department_id
        LEFT JOIN designations g ON g.id = u.designation_id
+       ${USER_ORG_JOINS}
       WHERE a.user_id = $1
         AND ($2::uuid[] IS NULL OR a.portal_id = ANY($2::uuid[]))
         AND p.is_enabled AND p.webhook_url IS NOT NULL`,
@@ -83,6 +117,13 @@ export async function enqueuePortalEvents(client, { userId, portalIds, type, rea
         designation: row.designation_name,
         deployed_project: row.deployed_project,
         deployed_location: row.deployed_location,
+        // Organisation (project-based): the user's company / client and every project they are on.
+        company: row.company,
+        client: row.client,
+        projects: row.projects,
+        joining_date: row.joining_date,
+        exit_date: row.exit_date,
+        phone: row.phone,
       },
       access: {
         status: effectiveActive ? 'ACTIVE' : 'INACTIVE',

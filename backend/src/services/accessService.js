@@ -213,9 +213,12 @@ const GRANT_SELECT = `
 const DUMMY_HASH = bcrypt.hashSync('timing-equaliser-not-a-real-password', 12);
 
 /**
- * Verify credentials and return the user's grant for a portal, or null.
- * Returns null (never throws) for every failure reason, so callers answer
- * with one generic error and do not leak which check failed.
+ * Verify credentials and return the user's grant for a portal.
+ *   null              unknown email, no grant for this portal, or wrong password
+ *                     (one generic answer, so nothing leaks to someone guessing)
+ *   { disabled: true } the password IS correct but the account or this portal's
+ *                     access is switched off; only the real user gets this far,
+ *                     so the portal can tell them to contact HR
  */
 export async function authenticateForPortal(email, password, portalCode) {
   const { rows } = await query(`${GRANT_SELECT} WHERE u.email = $1 AND p.portal_code = $2`, [email, portalCode]);
@@ -223,7 +226,7 @@ export async function authenticateForPortal(email, password, portalCode) {
 
   const passwordOk = await bcrypt.compare(password, grant?.password_hash ?? DUMMY_HASH);
   if (!grant || !grant.password_hash || !passwordOk) return null;
-  if (grant.status !== 'ACTIVE' || !grant.is_active || !grant.is_enabled) return null;
+  if (grant.status !== 'ACTIVE' || !grant.is_active || !grant.is_enabled) return { disabled: true };
 
   delete grant.password_hash;
   return grant;

@@ -2057,3 +2057,72 @@ h1 .status {
     justify-content: space-between;
   }
 }
+
+/* ---- Projects (EMS organisation) --------------------------------------------- */
+.project-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.project-pick__list {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  background: var(--surface);
+}
+.project-pick__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.project-pick__item:hover {
+  background: var(--surface-3);
+}
+.project-pick__item.is-on {
+  background: var(--accent-soft);
+}
+.project-pick__item input {
+  margin-top: 3px;
+}
+.project-pick__item span {
+  display: flex;
+  flex-direction: column;
+}
+.project-list {
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.project-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.project-list li.is-dim {
+  opacity: 0.6;
+}
+.project-role {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--surface-3);
+  color: var(--text-3);
+}
+.project-role--manager,
+.project-role--hr {
+  background: var(--accent-soft);
+  color: var(--accent);
+}

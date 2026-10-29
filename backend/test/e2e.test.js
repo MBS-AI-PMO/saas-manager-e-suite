@@ -256,14 +256,88 @@ test('same department name from two EMS companies does not collide', async () =>
   assert.deepEqual(rows.map((r) => r.dept_name), ['Platform Engineering', 'Platform Engineering (EMS #99)']);
 });
 
+test('EMS organisation: catalogue sync, user company/client/projects, project filter', async () => {
+  const org = {
+    companies: [{ ems_id: 1, name: 'SoloChoicez', is_active: true }, { ems_id: 2, name: 'Old Co', is_active: true }],
+    clients: [{ ems_id: 50, name: 'NITB', company_ems_id: 1, is_active: true }],
+    projects: [
+      { ems_id: 4, title: 'Apollo', company_ems_id: 1, client_ems_id: 50, status: 'in_progress', start_date: '2026-01-01', end_date: null, is_active: true },
+      { ems_id: 5, title: 'Hermes', company_ems_id: 1, client_ems_id: null, status: 'in_progress', start_date: null, end_date: null, is_active: true },
+    ],
+  };
+  const first = await emsWebhook('org.synced', org);
+  assert.equal(first.status, 200);
+  // Apollo already existed (created from a user reference) and is now completed with company/client.
+  assert.equal(first.body.summary.companies, 2);
+  assert.equal(first.body.summary.clients, 1);
+  assert.equal(first.body.summary.projects, 2);
+
+  const replay = await emsWebhook('org.synced', org);
+  assert.equal(replay.body.summary.unchanged, true, 'identical catalogue costs nothing');
+
+  // A user on two projects (member of Apollo, Manager of Hermes) with company / client / dates.
+  const res = await emsWebhook('user.upserted', {
+    users: [
+      emsUser({
+        ems_user_id: 104,
+        email: 'org@corp.test',
+        full_name: 'Org Person',
+        company: { ems_id: 1, name: 'SoloChoicez' },
+        client: { ems_id: 50, name: 'NITB' },
+        deployed_projects: [
+          { ems_id: 4, title: 'Apollo', is_lead: false, role: 'member' },
+          { ems_id: 5, title: 'Hermes', is_lead: true, role: 'manager' },
+        ],
+        joining_date: '2026-02-01',
+        exit_date: null,
+        phone: '0300-1234567',
+      }),
+    ],
+  });
+  assert.equal(res.body.results[0].outcome, 'created');
+  const u = (await api('GET', `/api/v1/users/${res.body.results[0].user_id}`, { token: adminToken })).body.data;
+  assert.equal(u.company.name, 'SoloChoicez');
+  assert.equal(u.client.name, 'NITB');
+  assert.equal(u.joining_date, '2026-02-01');
+  assert.equal(u.phone, '0300-1234567');
+  assert.deepEqual(u.projects.map((p) => [p.title, p.role]), [['Apollo', 'member'], ['Hermes', 'manager']]);
+
+  // Project filter.
+  const catalogue = (await api('GET', '/api/v1/org', { token: adminToken })).body.data;
+  const hermes = catalogue.projects.find((p) => p.title === 'Hermes');
+  assert.equal(hermes.company_name, 'SoloChoicez');
+  const onHermes = (await api('GET', `/api/v1/users?project_id=${hermes.id}`, { token: adminToken })).body;
+  assert.deepEqual(onHermes.data.map((x) => x.email), ['org@corp.test']);
+
+  // A project EMS no longer lists is kept but marked inactive.
+  const dropped = await emsWebhook('org.synced', { ...org, projects: org.projects.slice(0, 1) });
+  assert.equal(dropped.body.summary.deactivated, 1);
+  const active = (await api('GET', '/api/v1/org?active=1', { token: adminToken })).body.data;
+  assert.deepEqual(active.projects.map((p) => p.title), ['Apollo']);
+  await emsWebhook('org.synced', org); // restore for later tests
+
+  // Later tests count EMS users: remove this test's person again.
+  await pool.query('DELETE FROM audit_log WHERE target_user = (SELECT id FROM saas_users WHERE ems_user_id = 104)');
+  await pool.query('DELETE FROM saas_users WHERE ems_user_id = 104');
+});
+
 test('direct user creation, duplicate email, and invalid role', async () => {
+  const apollo = (await pool.query('SELECT id FROM projects WHERE ems_ref_id = 4')).rows[0].id;
+
+  // Project-based: a project is required.
+  const noProject = await api('POST', '/api/v1/users', {
+    token: adminToken,
+    body: { full_name: 'No Project', email: 'np@vendor.test' },
+  });
+  assert.equal(noProject.status, 400);
+
   const created = await api('POST', '/api/v1/users', {
     token: adminToken,
     body: {
       full_name: 'Contractor Zed',
       email: 'Zed@Vendor.test',
       password: 'contractor-pass-1',
-      deployed_project: 'Vendor Ops',
+      project_ids: [apollo],
       portal_access: [{ portal_code: 'projects', role_code: 'viewer' }],
     },
   });
@@ -273,16 +347,18 @@ test('direct user creation, duplicate email, and invalid role', async () => {
   assert.equal(created.body.data.portal_access[0].role_code, 'VIEWER');
   assert.equal(created.body.data.has_password, true);
   assert.equal(created.body.data.password_hash, undefined);
+  assert.deepEqual(created.body.data.projects.map((p) => p.title), ['Apollo']);
+  assert.equal(created.body.data.deployed_project, 'Apollo');
 
   const dup = await api('POST', '/api/v1/users', {
     token: adminToken,
-    body: { full_name: 'Again', email: 'zed@vendor.test' },
+    body: { full_name: 'Again', email: 'zed@vendor.test', project_ids: [apollo] },
   });
   assert.equal(dup.status, 409);
 
   const badRole = await api('POST', '/api/v1/users', {
     token: adminToken,
-    body: { full_name: 'X Y', email: 'xy@vendor.test', portal_access: [{ portal_code: 'CONTENT', role_code: 'VIEWER' }] },
+    body: { full_name: 'X Y', email: 'xy@vendor.test', project_ids: [apollo], portal_access: [{ portal_code: 'CONTENT', role_code: 'VIEWER' }] },
   });
   assert.equal(badRole.status, 422, 'VIEWER exists on PROJECTS, not CONTENT');
 });
@@ -402,6 +478,19 @@ test('portal JWT: issue (with Laravel $2y$ hash), introspect, revoke invalidates
   const afterRevoke = await intro(issued.body.access_token);
   assert.equal(afterRevoke.body.active, false);
   assert.equal(afterRevoke.body.reason, 'PORTAL_ACCESS_INACTIVE');
+
+  // Disabled access is only revealed to someone who knows the password.
+  const disabled = await api('POST', '/api/v1/auth/token', {
+    body: { email: 'ayesha@corp.test', password: 'ems-password-1', portal_code: 'CONTENT' },
+  });
+  assert.equal(disabled.status, 403);
+  assert.equal(disabled.body.error.code, 'ACCESS_DISABLED');
+  assert.match(disabled.body.error.message, /contact HR/);
+  const guessed = await api('POST', '/api/v1/auth/token', {
+    body: { email: 'ayesha@corp.test', password: 'wrong-password-1', portal_code: 'CONTENT' },
+  });
+  assert.equal(guessed.status, 401, 'wrong password on a disabled account stays generic');
+  assert.equal(guessed.body.error.code, 'INVALID_CREDENTIALS');
 });
 
 test('EMS deactivation revokes every portal; reactivation restores previous setup', async () => {
@@ -422,7 +511,8 @@ test('EMS deactivation revokes every portal; reactivation restores previous setu
   const tokenWhileInactive = await api('POST', '/api/v1/auth/token', {
     body: { email: 'ayesha@corp.test', password: 'ems-password-1', portal_code: 'CONTENT' },
   });
-  assert.equal(tokenWhileInactive.status, 401);
+  assert.equal(tokenWhileInactive.status, 403, 'right password, account switched off');
+  assert.equal(tokenWhileInactive.body.error.code, 'ACCESS_DISABLED');
 
   await emsWebhook('user.upserted', { users: [emsUser({ password_hash: phpHash ?? undefined })] });
   await waitFor(() => portalInbox.length >= 2);
@@ -728,6 +818,54 @@ test('roles fetched from the portal: connect, refresh, push, guards, token role_
   const sw = await api('PATCH', '/api/v1/portals/OPS', { token: adminToken, body: { role_source: 'PORTAL', roles_url: rolesUrl } });
   assert.equal(sw.body.roles_fetch.ok, true);
   assert.deepEqual(sw.body.data.roles.map((r) => [r.role_code, r.external_role_id]), [['MANAGER', 'mgr-1']]);
+});
+
+test('organisation reaches portals: org.updated (opt-in), user events and /portal-sync/org', async () => {
+  const before = portalInbox.length;
+  // Subscribing sends the current catalogue straight away.
+  const on = await api('PATCH', '/api/v1/portals/CONTENT', { token: adminToken, body: { receive_org_events: true } });
+  assert.equal(on.status, 200);
+  assert.equal(on.body.data.receive_org_events, true);
+  // (Not drainOutbox: an earlier test leaves EMS_HRMS events retrying with backoff.)
+  const orgEvents = () => portalInbox.slice(before).filter((e) => e.event.type === 'org.updated');
+  await waitFor(() => orgEvents().length === 1);
+  const first = orgEvents()[0];
+  assert.ok(first.valid, 'org.updated is signed like every other event');
+  assert.equal(first.event.portal.code, 'CONTENT');
+  assert.ok(first.event.org.projects.some((p) => p.title === 'Apollo' && p.ems_id === 4 && p.company_ems_id === 1 && p.client_ems_id === 50));
+
+  // EMS renames a project: subscribers get the new catalogue.
+  const org = (await api('GET', '/api/v1/org', { token: adminToken })).body.data;
+  await emsWebhook('org.synced', {
+    companies: org.companies.filter((c) => c.is_active).map((c) => ({ ems_id: c.ems_id, name: c.name, is_active: true })),
+    clients: org.clients.map((c) => ({ ems_id: c.ems_id, name: c.name, company_ems_id: c.company_ems_id, is_active: true })),
+    projects: org.projects.map((p) => ({
+      ems_id: p.ems_id,
+      title: p.ems_id === 4 ? 'Apollo II' : p.title,
+      company_ems_id: p.company_ems_id,
+      client_ems_id: p.client_ems_id,
+      status: p.status,
+      start_date: p.start_date,
+      end_date: p.end_date,
+      is_active: true,
+    })),
+  });
+  await waitFor(() => orgEvents().length === 2);
+  assert.ok(orgEvents()[1].event.org.projects.some((p) => p.title === 'Apollo II'));
+
+  // Every user event carries the organisation.
+  const userEvent = portalInbox.find((e) => e.event.user);
+  assert.ok(Array.isArray(userEvent.event.user.projects));
+  assert.ok('company' in userEvent.event.user && 'joining_date' in userEvent.event.user);
+
+  // Portals can pull the catalogue with their own credentials.
+  const basic = `Basic ${Buffer.from(`CONTENT:${PORTAL_SECRET}`).toString('base64')}`;
+  const pulled = await api('GET', '/api/v1/portal-sync/org', { headers: { Authorization: basic } });
+  assert.equal(pulled.status, 200);
+  assert.ok(pulled.body.org.projects.some((p) => p.title === 'Apollo II'));
+  assert.equal((await api('GET', '/api/v1/portal-sync/org', { headers: { Authorization: 'Basic eDp5' } })).status, 401);
+
+  await api('PATCH', '/api/v1/portals/CONTENT', { token: adminToken, body: { receive_org_events: false } });
 });
 
 test('overview and activity', async () => {

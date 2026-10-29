@@ -11,12 +11,13 @@ import { conflict, notFound, unprocessable } from '../utils/errors.js';
 import { applyAutoGrants, setPortalAccess } from './accessService.js';
 import { writeAudit } from './auditService.js';
 import { alignEmsPortalRoles, syncEmsRolesIntoPortal } from './emsRoleService.js';
+import { enqueueOrgEvents } from './orgService.js';
 
 const newSecret = () => crypto.randomBytes(32).toString('hex');
 
 const PORTAL_SELECT = `
   SELECT p.id, p.portal_name, p.portal_code, p.base_url, p.webhook_url, p.is_enabled, p.auto_grant_role, p.role_source,
-         p.roles_url, p.roles_synced_at, p.roles_sync_error,
+         p.roles_url, p.roles_synced_at, p.roles_sync_error, p.receive_org_events,
          (p.webhook_url IS NOT NULL) AS has_webhook, p.created_at, p.updated_at,
          COALESCE((
            SELECT json_agg(json_build_object(
@@ -72,9 +73,18 @@ export async function createPortal(input, admin) {
 
     const secret = newSecret();
     const { rows } = await client.query(
-      `INSERT INTO portals (portal_name, portal_code, base_url, webhook_url, webhook_secret, role_source, roles_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [input.portal_name, input.portal_code, input.base_url ?? null, input.webhook_url ?? null, secret, input.role_source, input.roles_url ?? null],
+      `INSERT INTO portals (portal_name, portal_code, base_url, webhook_url, webhook_secret, role_source, roles_url, receive_org_events)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [
+        input.portal_name,
+        input.portal_code,
+        input.base_url ?? null,
+        input.webhook_url ?? null,
+        secret,
+        input.role_source,
+        input.roles_url ?? null,
+        input.receive_org_events ?? false,
+      ],
     );
     if (input.role_source === 'EMS') {
       await requireEmsRoles(client);
@@ -101,6 +111,8 @@ export async function createPortal(input, admin) {
       await client.query('UPDATE portals SET auto_grant_role = $2 WHERE id = $1', [rows[0].id, input.auto_grant_role]);
       autoGranted = await applyAutoGrants(client, { portalId: rows[0].id, actor: { id: admin.id, label: admin.email } });
     }
+    // Organisation subscribers get the current companies / clients / projects straight away.
+    if (input.receive_org_events) await enqueueOrgEvents(client, 'PORTAL_SUBSCRIBED', rows[0].id);
     await audit(client, admin, 'PORTAL_CREATED', { portal: input.portal_code, roles: codes, auto_granted: autoGranted });
     return { portal: await getPortal(input.portal_code, client), webhook_secret: secret };
   });
@@ -109,7 +121,7 @@ export async function createPortal(input, admin) {
 export async function updatePortal(code, patch, admin) {
   return withTransaction(async (client) => {
     const id = await portalId(client, code);
-    const before = (await client.query('SELECT role_source, auto_grant_role FROM portals WHERE id = $1', [id])).rows[0];
+    const before = (await client.query('SELECT role_source, auto_grant_role, receive_org_events FROM portals WHERE id = $1', [id])).rows[0];
     const switchingToEms = patch.role_source === 'EMS' && before.role_source !== 'EMS';
     if (switchingToEms) await requireEmsRoles(client);
     if (patch.role_source === 'PORTAL') {
@@ -131,6 +143,10 @@ export async function updatePortal(code, patch, admin) {
     let autoGranted = 0;
     if (patch.auto_grant_role) {
       autoGranted = await applyAutoGrants(client, { portalId: id, actor: { id: admin.id, label: admin.email } });
+    }
+    // Just subscribed to organisation events: send the current catalogue now.
+    if (patch.receive_org_events === true && !before.receive_org_events) {
+      await enqueueOrgEvents(client, 'PORTAL_SUBSCRIBED', id);
     }
     await audit(client, admin, 'PORTAL_UPDATED', { portal: code, changes: patch, auto_granted: autoGranted });
     return { ...(await getPortal(code, client)), auto_granted: autoGranted };

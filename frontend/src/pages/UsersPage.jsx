@@ -14,8 +14,11 @@ import { useUsers } from '../hooks/useUsers.js';
 export function UsersPage({ portals, reloadPortals, notify }) {
   const departments = useAsync(() => api.listDepartments(), []);
   const designations = useAsync(() => api.listDesignations(), []);
+  // EMS projects: the project filter and the (required) project picker for new users.
+  const org = useAsync(() => api.org({ activeOnly: true }), []);
+  const projects = org.data?.projects ?? [];
   const [searchInput, setSearchInput] = useState('');
-  const [filters, setFilters] = useState({ search: '', source: '', status: '', departmentId: '', page: 1, pageSize: 25 });
+  const [filters, setFilters] = useState({ search: '', source: '', status: '', departmentId: '', projectId: '', page: 1, pageSize: 25 });
   const set = (k, v) => setFilters((f) => ({ ...f, [k]: v, page: 1 }));
 
   useEffect(() => {
@@ -58,6 +61,15 @@ export function UsersPage({ portals, reloadPortals, notify }) {
               <Icon name="search" size={16} />
               <input type="search" placeholder="Search name, email, staff ID" aria-label="Search users" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
             </div>
+            <select className="select" aria-label="Project" value={filters.projectId} onChange={(e) => set('projectId', e.target.value)}>
+              <option value="">All projects</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.title}
+                  {p.client_name ? ` · ${p.client_name}` : ''}
+                </option>
+              ))}
+            </select>
             <select className="select" aria-label="Department" value={filters.departmentId} onChange={(e) => set('departmentId', e.target.value)}>
               <option value="">All departments</option>
               {departments.data?.map((d) => (
@@ -80,7 +92,7 @@ export function UsersPage({ portals, reloadPortals, notify }) {
               <tr>
                 <th>User</th>
                 <th>Department / Designation</th>
-                <th>Deployment</th>
+                <th>Projects</th>
                 <th>Portal access</th>
                 <th>Account</th>
                 <th aria-label="Open" />
@@ -128,8 +140,8 @@ export function UsersPage({ portals, reloadPortals, notify }) {
                     <div className="muted small">{u.designation_name}</div>
                   </td>
                   <td>
-                    <div>{u.deployed_project ?? <span className="muted">—</span>}</div>
-                    <div className="muted small">{u.deployed_location}</div>
+                    <ProjectChips projects={u.projects} />
+                    <div className="muted small">{[u.company?.name, u.client?.name].filter(Boolean).join(' · ') || u.deployed_location}</div>
                   </td>
                   <td>
                     <div className="access-chips">
@@ -178,6 +190,7 @@ export function UsersPage({ portals, reloadPortals, notify }) {
         portals={portals ?? []}
         departments={departments.data ?? []}
         designations={designations.data ?? []}
+        projects={projects}
         onClose={() => setCreating(false)}
         onCreated={(user) => {
           setCreating(false);
@@ -219,8 +232,16 @@ function UserProfile({ user, portals, isPending, onChange }) {
           <dd>{user.designation_name ?? '—'}</dd>
         </div>
         <div>
-          <dt>Deployed project</dt>
-          <dd>{user.deployed_project ?? '—'}</dd>
+          <dt>Company</dt>
+          <dd>{user.company?.name ?? '—'}</dd>
+        </div>
+        <div>
+          <dt>Client</dt>
+          <dd>{user.client?.name ?? '—'}</dd>
+        </div>
+        <div>
+          <dt>Joined</dt>
+          <dd>{user.joining_date ?? '—'}{user.exit_date ? ` · left ${user.exit_date}` : ''}</dd>
         </div>
         <div>
           <dt>Location</dt>
@@ -231,6 +252,21 @@ function UserProfile({ user, portals, isPending, onChange }) {
           <dd>{user.ems_role_name ?? '—'}</dd>
         </div>
       </dl>
+
+      <h3 className="section-title">Projects</h3>
+      {user.projects?.length ? (
+        <ul className="project-list">
+          {user.projects.map((p) => (
+            <li key={p.id} className={p.is_active ? '' : 'is-dim'}>
+              <strong>{p.title}</strong>
+              <span className={`project-role project-role--${p.role}`}>{PROJECT_ROLE_LABEL[p.role] ?? p.role}</span>
+              {!p.is_active && <span className="muted small"> · no longer in EMS</span>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">Not on any project.</p>
+      )}
 
       <h3 className="section-title">Portal access</h3>
       {user.status !== 'ACTIVE' && (
@@ -255,6 +291,26 @@ function UserProfile({ user, portals, isPending, onChange }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+const PROJECT_ROLE_LABEL = { member: 'Member', manager: 'Manager', hr: 'HR' };
+
+/** A user's projects in the list: first two, then "+N". */
+function ProjectChips({ projects = [] }) {
+  if (!projects.length) return <span className="muted">—</span>;
+  const shown = projects.slice(0, 2);
+  const rest = projects.length - shown.length;
+  return (
+    <div className="access-chips" title={projects.map((p) => `${p.title} (${PROJECT_ROLE_LABEL[p.role] ?? p.role})`).join('\n')}>
+      {shown.map((p) => (
+        <span key={p.id} className="access-chip is-on">
+          {p.title}
+          {p.role !== 'member' ? ` · ${PROJECT_ROLE_LABEL[p.role]}` : ''}
+        </span>
+      ))}
+      {rest > 0 && <span className="access-chip">+{rest}</span>}
     </div>
   );
 }

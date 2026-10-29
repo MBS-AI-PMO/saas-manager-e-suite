@@ -12,6 +12,7 @@ import { Router } from 'express';
 import { verifyEmsSignature } from '../middleware/verifyEmsSignature.js';
 import { validateBody } from '../middleware/validate.js';
 import { upsertEmsRoles } from '../services/emsRoleService.js';
+import { upsertOrgCatalog } from '../services/orgService.js';
 import { deactivateEmsUsers, upsertEmsUser } from '../services/userService.js';
 import { logger } from '../utils/logger.js';
 import { emsWebhookSchema } from '../validation/schemas.js';
@@ -26,6 +27,13 @@ webhooksRouter.post('/ems-user', verifyEmsSignature, validateBody(emsWebhookSche
     const summary = await upsertEmsRoles(data.roles, event_id);
     logger.info('EMS roles synced', { event_id, ...summary });
     return res.json({ event_id, processed: data.roles.length, summary, results: [] });
+  }
+
+  if (event === 'org.synced') {
+    const summary = await upsertOrgCatalog(data, event_id);
+    logger.info('EMS organisation synced', { event_id, ...summary });
+    const processed = data.companies.length + data.clients.length + data.projects.length;
+    return res.json({ event_id, processed, summary, results: [] });
   }
 
   let results;
